@@ -1,17 +1,35 @@
-# ToDo
-Dieses ToDo App ist eine einfache Umsetzung eines TodoBoards für verschiedene Einsatzbereiche.
-Es ist sehr simpel gehalten und verfolgt das Ziel der Aufgabenverfolgung. Alle Daten werden lokal gehalten und sind in Verantwortung des Users.
+# ToDo App
 
-## Requirements
-Für das Design wurde pySide6 verwendet.
-Man installiert es mit:
+Diese ToDo-Applikation ist ein leichtgewichtiges Aufgaben-Board zur Verwaltung von Tasks und Subtasks. Der Schwerpunkt liegt auf einfacher Bedienung, lokaler Datenspeicherung und übersichtlicher Darstellung ohne unnötige Zusatzfunktionen oder Cloud-Anbindung.
 
-``` pip install pyside6 ```
+---
 
-## Persistierung
-Die Aufgaben und die Subtasks werden bei jeder Änderung in ein lokales JSON File gespeichert und auch von da geladen.
-Mit einem Klick auf "Export" wird ein html File generiert, welches die erledigten Tasks des aktuellen Monats anzeigt.
+## Features
 
-## Sinn und Zweck
-Oftmals ist das richtige Tool zu finden schwer. Viele bekannte Tools sind Überladen, kosten oder sind einfach nicht genau so wie man sie haben möchte.
-Aus diesem Grund habe ich mir selbst schnell ein Tool erstellt um ein schnelles Tasktracking zu ermöglichen.
+- Aufgaben mit Subtasks erstellen, bearbeiten und löschen  
+- Lokale, transparente Datenspeicherung in einer JSON-Datei  
+- Automatisches Speichern bei jeder Änderung  
+- Generierung einer HTML-Übersicht der erledigten Tasks des aktuellen Monats  
+- Minimalistisches und übersichtliches Benutzerinterface mit PySide6  
+
+---
+
+## Installation und Ausführung
+
+### Ausführung
+``` python todo_tool.py ```
+
+### Voraussetzungen
+- Python 3.9 oder höher
+- `pip`
+
+### Abhängigkeiten installieren
+```bash
+pip install pyside6
+```
+
+## Persistenz
+Alle Daten werden lokal in einer JSON-Datei gespeichert und beim Start der Anwendung automatisch geladen.
+Speicherung: ``` ./data/tasks.json ```
+Format: JSON, gut lesbar und leicht zu sichern
+Über die Export-Funktion wird ein HTML-Report erzeugt, welcher die im aktuellen Monat abgeschlossenen Aufgaben auflistet.
