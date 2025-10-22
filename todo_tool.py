@@ -7,6 +7,13 @@ ToDo Tool (Deutsch) – PySide6 (Variante C: Gradient NUR im Aufgabenbereich)
 - Filter und Sortierung (Status / Priorität / Titel / Datum)
 - Export: Alle im aktuellen Monat auf "Done" gesetzten Tasks (inkl. Subtasks)
 - Schöne, moderne Oberfläche; **schwarzer Text**; **pastelliger Verlauf nur im Tree-Bereich**
+- Zusatz:
+    * Rechts neben jedem Task kompakte Punkt-Indicatoren mit Zählung der Subtask-Status:
+        - ToDo
+        - Warten (Warte auf Antwort / Warten auf anderen Arbeitstag / Warten auf Mail / Meeting vereinbart)
+        - On Hold
+        - Done
+    * Bugfix: Wenn nur ToDo-Subtasks (oder Mischung aus ToDo/Done) vorhanden sind, ist der Task-Status NICHT mehr fälschlich "On Hold", sondern "ToDo".
 
 Voraussetzungen:
     pip install PySide6
@@ -18,7 +25,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field, asdict
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime
 from pathlib import Path
 
@@ -50,9 +57,27 @@ STATUS_PRIORITY_ORDER = [
     "Done",
 ]
 
+WAITING_STATUSES = {
+    "Warte auf Antwort",
+    "Warten auf anderen Arbeitstag",
+    "Warten auf Mail",
+    "Meeting vereinbart",
+}
+
 
 def iso_now() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def group_status(status: str) -> str:
+    """Mappt Subtask-Status in 4 Kategorien: todo, waiting, onhold, done."""
+    if status == "Done":
+        return "done"
+    if status == "On Hold":
+        return "onhold"
+    if status in WAITING_STATUSES:
+        return "waiting"
+    return "todo"
 
 
 @dataclass
@@ -98,6 +123,14 @@ class Task:
         return self
 
     def recompute_status_from_subtasks(self):
+        """Bestimmt den Task-Status anhand der Subtasks.
+        Regeln:
+          - keine Subtasks: Status bleibt manuell gesetzt; Finished-Date nur bei Done
+          - alle Done: Task Done (Finished-Date = max Subtask-Fertig)
+          - alle ToDo: Task ToDo
+          - Mischung nur aus ToDo/Done: Task ToDo  (BUGFIX)
+          - ansonsten: „dominanter“ Nicht-ToDo/Done-Status nach STATUS_PRIORITY_ORDER
+        """
         if not self.subtasks:
             if self.status == "Done":
                 if not self.finished_date:
@@ -107,6 +140,8 @@ class Task:
             return
 
         sub_statuses = [s.status for s in self.subtasks]
+
+        # Alle done?
         if all(st == "Done" for st in sub_statuses):
             self.status = "Done"
             done_dates = [
@@ -120,18 +155,28 @@ class Task:
                 self.finished_date = iso_now()
             return
 
+        # Alle todo?
         if all(st == "ToDo" for st in sub_statuses):
             self.status = "ToDo"
             self.finished_date = None
             return
 
+        # Mischung nur ToDo/Done => Task bleibt ToDo (BUGFIX)
+        uniq = set(sub_statuses)
+        if uniq.issubset({"ToDo", "Done"}):
+            self.status = "ToDo"
+            self.finished_date = None
+            return
+
+        # Sonst: dominanter Nicht-(ToDo/Done)-Status
         candidates = [st for st in sub_statuses if st not in ("ToDo", "Done")]
         if candidates:
             candidates.sort(key=lambda s: STATUS_PRIORITY_ORDER.index(s))
-            dominant = candidates[-1]
+            dominant = candidates[-1]  # spätere Position = "höhere Dringlichkeit" in unserer Ordnung
             self.status = dominant
         else:
-            self.status = "On Hold"
+            # Sollte wegen uniq-Check oben praktisch nicht mehr vorkommen
+            self.status = "ToDo"
         self.finished_date = None
 
     def set_status(self, new_status: str):
@@ -188,7 +233,7 @@ class TaskDialog(QtWidgets.QDialog):
     def __init__(self, parent=None, task: Optional[Task]=None):
         super().__init__(parent)
         self.setWindowTitle("Aufgabe bearbeiten" if task else "Neue Aufgabe")
-        self.setMinimumWidth(520)
+        self.setMinimumWidth(560)
 
         self.title_edit = QtWidgets.QLineEdit()
         self.desc_edit = QtWidgets.QPlainTextEdit()
@@ -199,6 +244,8 @@ class TaskDialog(QtWidgets.QDialog):
         self.status_combo.addItems(STATI)
 
         form = QtWidgets.QFormLayout()
+        form.setHorizontalSpacing(14)
+        form.setVerticalSpacing(10)
         form.addRow("Titel:", self.title_edit)
         form.addRow("Beschreibung:", self.desc_edit)
         form.addRow("Priorität:", self.prio_combo)
@@ -209,6 +256,8 @@ class TaskDialog(QtWidgets.QDialog):
         btns.rejected.connect(self.reject)
 
         layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
         layout.addLayout(form)
         layout.addWidget(btns)
 
@@ -242,7 +291,7 @@ class SubtaskDialog(QtWidgets.QDialog):
     def __init__(self, parent=None, subtask: Optional[Subtask]=None):
         super().__init__(parent)
         self.setWindowTitle("Subtask bearbeiten" if subtask else "Neuer Subtask")
-        self.setMinimumWidth(480)
+        self.setMinimumWidth(520)
 
         self.title_edit = QtWidgets.QLineEdit()
         self.desc_edit = QtWidgets.QPlainTextEdit()
@@ -250,6 +299,8 @@ class SubtaskDialog(QtWidgets.QDialog):
         self.status_combo.addItems(STATI)
 
         form = QtWidgets.QFormLayout()
+        form.setHorizontalSpacing(14)
+        form.setVerticalSpacing(10)
         form.addRow("Titel:", self.title_edit)
         form.addRow("Beschreibung:", self.desc_edit)
         form.addRow("Status:", self.status_combo)
@@ -259,6 +310,8 @@ class SubtaskDialog(QtWidgets.QDialog):
         btns.rejected.connect(self.reject)
 
         layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
         layout.addLayout(form)
         layout.addWidget(btns)
 
@@ -288,9 +341,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(APP_NAME)
-        self.resize(1100, 700)
+        self.resize(1180, 740)
 
         self.tree = QtWidgets.QTreeWidget()
+        self.tree.viewport().setAttribute(Qt.WA_StyledBackground, True)
+        self.tree.setAlternatingRowColors(False)
         self.tree.setColumnCount(6)
         self.tree.setHeaderLabels(["Titel", "Beschreibung", "Priorität", "Status", "Fertig am", "Typ"])
         self.tree.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
@@ -298,6 +353,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tree.setAnimated(True)
         self.tree.setIndentation(24)
         self.setCentralWidget(self.tree)
+        self.tree.setItemDelegate(RowDelegate(self.tree))
 
         self._create_actions()
         self._create_toolbar()
@@ -400,6 +456,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _apply_styles(self):
         self.setStyleSheet("""
             /* --- Grundfarben hell, Texte schwarz --- */
+            * { font-size: 14px; }
             QMainWindow {
                 background: #FFFFFF;
                 color: #000000;
@@ -408,6 +465,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 background: #FFFFFF;
                 color: #000000;
                 border: 1px solid #E5E7EB;
+                border-radius: 12px;
             }
             QLabel {
                 color: #000000;
@@ -417,54 +475,54 @@ class MainWindow(QtWidgets.QMainWindow):
                 background: #FFFFFF;
                 color: #000000;
                 border: 1px solid #E5E7EB;
-                border-radius: 8px;
-                padding: 6px 8px;
+                border-radius: 10px;
+                padding: 8px 10px;
                 selection-background-color: #D0E7FF;
                 selection-color: #000000;
             }
+            QPlainTextEdit { padding: 10px; }
             QToolBar {
                 background: #FFFFFF;
-                spacing: 6px;
-                padding: 6px;
+                spacing: 8px;
+                padding: 8px;
                 border-bottom: 1px solid #E5E7EB;
             }
             QToolButton {
                 color: #000000;
                 background: #FFFFFF;
                 border: 1px solid #E5E7EB;
-                border-radius: 10px;
-                padding: 6px 10px;
+                border-radius: 12px;
+                padding: 8px 12px;
             }
-            QToolButton:hover { background: #F5F7FA; }
-            QToolButton:pressed { background: #EDF1F5; }
+            QToolButton:hover { background: #F7F9FB; }
+            QToolButton:pressed { background: #EEF3F8; }
 
             QHeaderView::section {
                 background: #FFFFFF;
                 color: #000000;
-                padding: 8px;
+                padding: 10px 8px;
                 border: none;
                 border-bottom: 1px solid #E5E7EB;
+                font-weight: 600;
             }
 
             /* Pastell-Gradient NUR im Tree-Widget */
-            QTreeWidget {
+            QTreeWidget { background: transparent; border: none; color: #000000; }
+
+            QTreeWidget::viewport {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0   #f8a1c4,
+                    stop:0    #f8a1c4,
                     stop:0.25 #ffd7a8,
                     stop:0.5  #fff2b3,
                     stop:0.75 #c8f3e1,
                     stop:1    #cde7ff
                 );
-                color: #000000;
-                border: none;
             }
-            QTreeView::item:hover {
-                background: rgba(0,0,0,0.04);
-            }
-            QTreeView::item:selected {
-                background: rgba(30, 144, 255, 0.25);
-                color: #000000;
-            }
+
+            /* Items transparent lassen – wir malen Tasks selbst weiß im Delegate */
+            QTreeView::item { background: transparent; color: #000000; }
+            QTreeView::item:hover    { background: rgba(0,0,0,0.03); }
+            QTreeView::item:selected { background: rgba(30,144,255,0.22); color:#000000; }
 
             QDialog {
                 background: #FFFFFF;
@@ -474,10 +532,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 background: #FFFFFF;
                 color: #000000;
                 border: 1px solid #E5E7EB;
-                border-radius: 8px;
-                padding: 6px 12px;
+                border-radius: 10px;
+                padding: 8px 14px;
             }
-            QDialog QPushButton:hover { background: #F5F7FA; }
+            QDialog QPushButton:hover { background: #F7F9FB; }
 
             QStatusBar { color: #000000; }
         """)
@@ -489,6 +547,12 @@ class MainWindow(QtWidgets.QMainWindow):
     def persist_and_reload(self):
         save_tasks(self.path, self.tasks)
         self.load_and_refresh()
+
+    def _subtask_counts(self, t: Task) -> Dict[str, int]:
+        counts = {"todo": 0, "waiting": 0, "onhold": 0, "done": 0}
+        for s in t.subtasks:
+            counts[group_status(s.status)] += 1
+        return counts
 
     def refresh_tree_view(self):
         self.tree.clear()
@@ -536,11 +600,20 @@ class MainWindow(QtWidgets.QMainWindow):
             top.setForeground(0, QtGui.QBrush(QtGui.QColor("#000000")))
             top.setData(0, Qt.UserRole, ("task", id(t)))
 
+            # Subtask-Status-Indikatoren vorbereiten
+            counts = self._subtask_counts(t)
+            top.setData(0, Qt.UserRole + 1, counts)
+            # Tooltip mit Zahlen
+            tt = (f"Subtasks – ToDo: {counts['todo']} | Warten: {counts['waiting']} | "
+                  f"On Hold: {counts['onhold']} | Done: {counts['done']}")
+            top.setToolTip(0, tt)
+
             for s in t.subtasks:
                 child = QtWidgets.QTreeWidgetItem([
                     s.title, s.description, "", s.status, s.finished_date or "", "Subtask"
                 ])
                 child.setData(0, Qt.UserRole, ("subtask", id(t), id(s)))
+                self.tree.addTopLevelItem(top) if False else None  # no-op, keeps structure readable
                 top.addChild(child)
 
             self.tree.addTopLevelItem(top)
@@ -549,7 +622,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tree.resizeColumnToContents(0)
         self.tree.resizeColumnToContents(2)
         self.tree.resizeColumnToContents(3)
-        self.tree.setColumnWidth(1, 420)
+        self.tree.setColumnWidth(1, 460)
 
         self.statusBar().showMessage(f"{self.tree.topLevelItemCount()} Aufgaben angezeigt")
 
@@ -805,6 +878,120 @@ def main():
     win = MainWindow()
     win.show()
     sys.exit(app.exec())
+
+
+class RowDelegate(QtWidgets.QStyledItemDelegate):
+    """Malt für Top-Level-Tasks eine „Karte“ + rechts die Subtask-Status-Indikatoren (Punkte mit Zahl)."""
+    # Farben für die vier Kategorien (pastellig, auf Weiß gut sichtbar – Text bleibt schwarz)
+    COLOR_TODO   = QtGui.QColor("#C3D6FD")   # graublau
+    COLOR_WAIT   = QtGui.QColor("#F59E0B")   # amber
+    COLOR_ONHOLD = QtGui.QColor("#F86B6B")   # violett
+    COLOR_DONE   = QtGui.QColor("#BDFFDD")   # grün
+
+    def _draw_indicator(self, painter: QtGui.QPainter, center: QtCore.QPointF, radius: float, color: QtGui.QColor, text: str):
+        painter.save()
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        # Kreis
+        painter.setBrush(color)
+        pen = QtGui.QPen(QtGui.QColor(0,0,0,30))
+        pen.setWidthF(1.0)
+        painter.setPen(pen)
+        painter.drawEllipse(center, radius, radius)
+        # Zahl (klein, mittig)
+        if text:
+            font = painter.font()
+            font.setPointSizeF(max(8.0, font.pointSizeF()))
+            font.setBold(True)
+            painter.setFont(font)
+            painter.setPen(QtGui.QPen(QtGui.QColor("#000000")))
+            rect = QtCore.QRectF(center.x()-radius, center.y()-radius, radius*2, radius*2)
+            painter.drawText(rect, Qt.AlignCenter, text)
+        painter.restore()
+
+    def paint(self, painter: QtGui.QPainter, option: QtWidgets.QStyleOptionViewItem, index: QtCore.QModelIndex):
+        view = option.widget  # QTreeWidget
+        is_top = not index.parent().isValid()  # True = Task (Top-Level)
+
+        if is_top and index.column() == 0:
+            painter.save()
+
+            # Zeilenrechteck über ALLE Spalten bestimmen
+            row_rect = option.rect
+            last_col = view.columnCount() - 1
+            last_rect = view.visualRect(view.model().index(index.row(), last_col, index.parent()))
+            full_rect = QtCore.QRect(row_rect.left(), row_rect.top(),
+                                     last_rect.right() - row_rect.left(), row_rect.height())
+
+            # Innenabstand für "Karten"-Look
+            inset = 6
+            card_rect = full_rect.adjusted(inset, 4, -inset, -4)
+
+            # Karte
+            path = QtGui.QPainterPath()
+            path.addRoundedRect(card_rect, 12, 12)
+            painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+            painter.fillPath(path, QtGui.QColor("#FFFFFF"))
+
+            # feine Kontur + zarter Schatteneffekt
+            pen = QtGui.QPen(QtGui.QColor("#E5E7EB"))
+            pen.setWidthF(1.0)
+            painter.setPen(pen)
+            painter.drawPath(path)
+
+            # leichte Top-Highlight-Linie (Optik)
+            top_line = QtCore.QLineF(card_rect.left()+1, card_rect.top()+1, card_rect.right()-1, card_rect.top()+1)
+            painter.setPen(QtGui.QPen(QtGui.QColor(0,0,0,12)))
+            painter.drawLine(top_line)
+
+            painter.restore()
+
+        # Standard-Text/Icons etc. malen
+        super().paint(painter, option, index)
+
+        # Nach dem Standard-Draw die Indikatoren rechts einzeichnen (nur Top-Level, Spalte 0)
+        if is_top and index.column() == 0:
+            item = view.itemFromIndex(index)
+            counts: Optional[Dict[str, int]] = item.data(0, Qt.UserRole + 1)
+            if counts:
+                painter.save()
+                painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+
+                # Fläche der Karte erneut bestimmen
+                row_rect = option.rect
+                last_col = view.columnCount() - 1
+                last_rect = view.visualRect(view.model().index(index.row(), last_col, index.parent()))
+                full_rect = QtCore.QRect(row_rect.left(), row_rect.top(),
+                                         last_rect.right() - row_rect.left(), row_rect.height())
+                inset = 6
+                card_rect = full_rect.adjusted(inset, 4, -inset, -4)
+
+                # Rechtsbündige Anordnung der vier Punkte
+                radius = 9.0
+                gap = 10.0
+                total_w = radius*2*4 + gap*3
+                cx_right = card_rect.right() - 14 - radius  # 14px Innenabstand rechts
+                cy = card_rect.center().y()
+
+                centers = [
+                    QtCore.QPointF(cx_right - (radius*2 + gap)*3, cy),
+                    QtCore.QPointF(cx_right - (radius*2 + gap)*2, cy),
+                    QtCore.QPointF(cx_right - (radius*2 + gap)*1, cy),
+                    QtCore.QPointF(cx_right - (radius*2 + gap)*0, cy),
+                ]
+
+                # Reihenfolge: ToDo | Warten | On Hold | Done
+                self._draw_indicator(painter, centers[0], radius, self.COLOR_TODO,   str(counts.get("todo", 0)) if counts.get("todo", 0) else "")
+                self._draw_indicator(painter, centers[1], radius, self.COLOR_WAIT,   str(counts.get("waiting", 0)) if counts.get("waiting", 0) else "")
+                self._draw_indicator(painter, centers[2], radius, self.COLOR_ONHOLD, str(counts.get("onhold", 0)) if counts.get("onhold", 0) else "")
+                self._draw_indicator(painter, centers[3], radius, self.COLOR_DONE,   str(counts.get("done", 0)) if counts.get("done", 0) else "")
+
+                painter.restore()
+
+    def sizeHint(self, option: QtWidgets.QStyleOptionViewItem, index: QtCore.QModelIndex):
+        # Etwas mehr vertikale Luft, damit die Karte „atmen“ kann
+        sz = super().sizeHint(option, index)
+        extra = 8 if not index.parent().isValid() else 4
+        return QtCore.QSize(sz.width(), sz.height() + extra)
 
 
 if __name__ == "__main__":
