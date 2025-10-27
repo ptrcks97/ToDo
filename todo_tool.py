@@ -15,8 +15,12 @@ ToDo Tool (Deutsch) – PySide6 (Variante C: Gradient NUR im Aufgabenbereich)
         - Done
     * Bugfix: Wenn nur ToDo-Subtasks (oder Mischung aus ToDo/Done) vorhanden sind, ist der Task-Status NICHT mehr fälschlich "On Hold", sondern "ToDo".
 
+Neu:
+- 2. Page „Status-Übersicht“ mit zwei Kuchendiagrammen (Tasks / Subtasks nach Status)
+- 3. Page „Abschlüsse pro Woche“ mit Balkendiagramm (Anzahl fertiggestellter Tasks pro ISO-Woche)
+
 Voraussetzungen:
-    pip install PySide6
+    pip install PySide6 PySide6-Addons
 
 Start:
     python todo_tool_gradient_C.py
@@ -25,12 +29,19 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field, asdict
-from typing import List, Optional, Dict, Any, Tuple
-from datetime import datetime
+from typing import List, Optional, Dict, Any, Tuple, Iterable
+from datetime import datetime, date
 from pathlib import Path
+from collections import defaultdict, OrderedDict
 
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import Qt
+
+# QtCharts (aus PySide6-Addons)
+from PySide6.QtCharts import (
+    QChart, QChartView, QPieSeries, QPieSlice,
+    QBarSet, QBarSeries, QBarCategoryAxis, QValueAxis
+)
 
 APP_NAME = "ToDo Tool"
 JSON_FILE = "todos.json"
@@ -172,10 +183,9 @@ class Task:
         candidates = [st for st in sub_statuses if st not in ("ToDo", "Done")]
         if candidates:
             candidates.sort(key=lambda s: STATUS_PRIORITY_ORDER.index(s))
-            dominant = candidates[-1]  # spätere Position = "höhere Dringlichkeit" in unserer Ordnung
+            dominant = candidates[-1]
             self.status = dominant
         else:
-            # Sollte wegen uniq-Check oben praktisch nicht mehr vorkommen
             self.status = "ToDo"
         self.finished_date = None
 
@@ -337,12 +347,151 @@ class SubtaskDialog(QtWidgets.QDialog):
         return s.normalize()
 
 
+# ---------- Charts-Seiten ----------
+
+class StatusChartsPage(QtWidgets.QWidget):
+    """Page mit zwei Kuchendiagrammen: Tasks nach Status, Subtasks nach Status"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.task_chart = self._build_pie_chart("Tasks nach Status")
+        self.subtask_chart = self._build_pie_chart("Subtasks nach Status")
+
+        self.task_view = QChartView(self.task_chart)
+        self.subtask_view = QChartView(self.subtask_chart)
+        for v in (self.task_view, self.subtask_view):
+            v.setRenderHint(QtGui.QPainter.Antialiasing, True)
+
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(16)
+        layout.addWidget(self.task_view, 1)
+        layout.addWidget(self.subtask_view, 1)
+
+    def _build_pie_chart(self, title: str) -> QChart:
+        chart = QChart()
+        chart.setTitle(title)
+        chart.setBackgroundBrush(QtGui.QBrush(QtGui.QColor("#FFFFFF")))
+        chart.setTitleBrush(QtGui.QBrush(QtGui.QColor("#000000")))
+        chart.legend().setVisible(True)
+        chart.legend().setLabelBrush(QtGui.QBrush(QtGui.QColor("#000000")))
+        return chart
+
+    def _apply_slice_style(self, series: QPieSeries):
+        # Labels sichtbar + schwarz
+        series.setLabelsVisible(True)
+        for i in range(series.count()):
+            sl: QPieSlice = series.slices()[i]
+            sl.setLabelBrush(QtGui.QBrush(QtGui.QColor("#000000")))
+            sl.setPen(QtGui.QPen(QtGui.QColor(0,0,0,40)))
+            # dezente Pastellfarben pro Status (konstant)
+            status = sl.label().split(" (")[0]
+            color_map = {
+                "ToDo": "#C3D6FD",
+                "Warten auf anderen Arbeitstag": "#FDE68A",
+                "Warten auf Mail": "#F9E79F",
+                "Warte auf Antwort": "#FCD34D",
+                "Meeting vereinbart": "#FDE2E2",
+                "On Hold": "#F86B6B",
+                "Done": "#BDFFDD",
+            }
+            c = QtGui.QColor(color_map.get(status, "#E5E7EB"))
+            sl.setBrush(QtGui.QBrush(c))
+
+    def update_counts(self, task_counts: Dict[str, int], sub_counts: Dict[str, int]):
+        # Tasks
+        t_series = QPieSeries()
+        for st in STATI:
+            val = int(task_counts.get(st, 0))
+            if val > 0:
+                t_series.append(f"{st} ({val})", val)
+        self._apply_slice_style(t_series)
+
+        self.task_chart.removeAllSeries()
+        self.task_chart.addSeries(t_series)
+        self.task_chart.legend().setLabelBrush(QtGui.QBrush(QtGui.QColor("#000000")))
+
+        # Subtasks
+        s_series = QPieSeries()
+        for st in STATI:
+            val = int(sub_counts.get(st, 0))
+            if val > 0:
+                s_series.append(f"{st} ({val})", val)
+        self._apply_slice_style(s_series)
+
+        self.subtask_chart.removeAllSeries()
+        self.subtask_chart.addSeries(s_series)
+        self.subtask_chart.legend().setLabelBrush(QtGui.QBrush(QtGui.QColor("#000000")))
+
+
+class WeeklyDonePage(QtWidgets.QWidget):
+    """Page mit Balkendiagramm: Anzahl erledigter Tasks pro ISO-Woche"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.chart = QChart()
+        self.chart.setTitle("Abgeschlossene Tasks pro ISO-Woche")
+        self.chart.setBackgroundBrush(QtGui.QBrush(QtGui.QColor("#FFFFFF")))
+        self.chart.setTitleBrush(QtGui.QBrush(QtGui.QColor("#000000")))
+        self.chart.legend().setVisible(False)
+
+        self.view = QChartView(self.chart)
+        self.view.setRenderHint(QtGui.QPainter.Antialiasing, True)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(8)
+        layout.addWidget(self.view, 1)
+
+    def update_weeks(self, week_counts: "OrderedDict[str, int]"):
+        # week_counts: Ordered nach Datum (z.B. "2025-W43": 7)
+        categories = list(week_counts.keys())
+        values = list(week_counts.values())
+
+        bar_set = QBarSet("Done")
+        bar_set.append(values)
+        # dezente Füllung + Kontur
+        bar_set.setBrush(QtGui.QBrush(QtGui.QColor("#BDFFDD")))
+        bar_set.setPen(QtGui.QPen(QtGui.QColor(0,0,0,60)))
+
+        series = QBarSeries()
+        series.append(bar_set)
+
+        self.chart.removeAllSeries()
+        self.chart.addSeries(series)
+
+        axisX = QBarCategoryAxis()
+        axisX.append(categories)
+        axisX.setLabelsBrush(QtGui.QBrush(QtGui.QColor("#000000")))
+        axisX.setTitleText("Woche")
+        axisX.setTitleBrush(QtGui.QBrush(QtGui.QColor("#000000")))
+
+        axisY = QValueAxis()
+        axisY.setLabelFormat("%d")
+        axisY.setMin(0)
+        axisY.setMax(max(values) if values else 1)
+        axisY.setLabelsBrush(QtGui.QBrush(QtGui.QColor("#000000")))
+        axisY.setTitleText("Anzahl Tasks (Done)")
+        axisY.setTitleBrush(QtGui.QBrush(QtGui.QColor("#000000")))
+
+        self.chart.createDefaultAxes()  # sorgt für Grundachsen
+        self.chart.setAxisX(axisX, series)
+        self.chart.setAxisY(axisY, series)
+
+
+# ---------- Main Window ----------
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(APP_NAME)
-        self.resize(1180, 740)
+        self.resize(1180, 780)
 
+        # Tabs
+        self.tabs = QtWidgets.QTabWidget()
+        self.tabs.setDocumentMode(True)
+        self.tabs.setTabPosition(QtWidgets.QTabWidget.North)
+
+        # Seite 1: Tree
+        self.page_tree = QtWidgets.QWidget()
         self.tree = QtWidgets.QTreeWidget()
         self.tree.viewport().setAttribute(Qt.WA_StyledBackground, True)
         self.tree.setAlternatingRowColors(False)
@@ -352,8 +501,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tree.setUniformRowHeights(True)
         self.tree.setAnimated(True)
         self.tree.setIndentation(24)
-        self.setCentralWidget(self.tree)
         self.tree.setItemDelegate(RowDelegate(self.tree))
+
+        tree_layout = QtWidgets.QVBoxLayout(self.page_tree)
+        tree_layout.setContentsMargins(0, 0, 0, 0)
+        tree_layout.addWidget(self.tree)
+
+        self.tabs.addTab(self.page_tree, "Aufgaben")
+
+        # Seite 2: Charts (Status)
+        self.status_page = StatusChartsPage()
+        self.tabs.addTab(self.status_page, "Status-Übersicht")
+
+        # Seite 3: Weekly Done
+        self.weekly_page = WeeklyDonePage()
+        self.tabs.addTab(self.weekly_page, "Abschlüsse pro Woche")
+
+        self.setCentralWidget(self.tabs)
 
         self._create_actions()
         self._create_toolbar()
@@ -368,6 +532,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.load_and_refresh()
 
         self.tree.itemDoubleClicked.connect(self.edit_selected_item)
+
+    # ----- UI Bausätze -----
 
     def _create_actions(self):
         self.act_add_task = QtGui.QAction("Aufgabe", self)
@@ -421,14 +587,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.filter_status = QtWidgets.QComboBox()
         self.filter_status.addItem("Alle")
         self.filter_status.addItems(STATI)
-        self.filter_status.currentIndexChanged.connect(self.refresh_tree_view)
+        self.filter_status.currentIndexChanged.connect(self.refresh_all_views)
         hl.addWidget(self.filter_status)
 
         hl.addWidget(QtWidgets.QLabel("Filter Prio:"))
         self.filter_prio = QtWidgets.QComboBox()
         self.filter_prio.addItem("Alle")
         self.filter_prio.addItems(PRIOS)
-        self.filter_prio.currentIndexChanged.connect(self.refresh_tree_view)
+        self.filter_prio.currentIndexChanged.connect(self.refresh_all_views)
         hl.addWidget(self.filter_prio)
 
         hl.addWidget(QtWidgets.QLabel("Sortieren nach:"))
@@ -540,13 +706,70 @@ class MainWindow(QtWidgets.QMainWindow):
             QStatusBar { color: #000000; }
         """)
 
+    # ----- Refresh-Flow -----
+
     def load_and_refresh(self):
         self.tasks = load_tasks(self.path)
-        self.refresh_tree_view()
+        self.refresh_all_views()
 
     def persist_and_reload(self):
         save_tasks(self.path, self.tasks)
         self.load_and_refresh()
+
+    def refresh_all_views(self):
+        self.refresh_tree_view()
+        self.refresh_status_charts()
+        self.refresh_weekly_done()
+
+    # ----- Helpers für Charts -----
+
+    def _status_counts_tasks(self) -> Dict[str, int]:
+        counts = {st: 0 for st in STATI}
+        for t in self.tasks:
+            counts[t.status] = counts.get(t.status, 0) + 1
+        return counts
+
+    def _status_counts_subtasks(self) -> Dict[str, int]:
+        counts = {st: 0 for st in STATI}
+        for t in self.tasks:
+            for s in t.subtasks:
+                counts[s.status] = counts.get(s.status, 0) + 1
+        return counts
+
+    def _week_key(self, dt: date) -> Tuple[int, int]:
+        # ISO-Kalender: (ISO-Jahr, ISO-Woche)
+        iso_year, iso_week, _ = dt.isocalendar()
+        return (iso_year, iso_week)
+
+    def _format_week_label(self, y: int, w: int) -> str:
+        return f"{y}-W{w:02d}"
+
+    def _weekly_done_counts(self) -> "OrderedDict[str, int]":
+        tmp: Dict[Tuple[int,int], int] = defaultdict(int)
+        for t in self.tasks:
+            if t.status == "Done" and t.finished_date:
+                try:
+                    d = datetime.fromisoformat(t.finished_date).date()
+                    key = self._week_key(d)
+                    tmp[key] += 1
+                except Exception:
+                    pass
+        # sortieren nach (jahr, woche)
+        ordered = OrderedDict()
+        for (y, w) in sorted(tmp.keys()):
+            ordered[self._format_week_label(y, w)] = tmp[(y, w)]
+        return ordered
+
+    def refresh_status_charts(self):
+        task_counts = self._status_counts_tasks()
+        sub_counts = self._status_counts_subtasks()
+        self.status_page.update_counts(task_counts, sub_counts)
+
+    def refresh_weekly_done(self):
+        weeks = self._weekly_done_counts()
+        self.weekly_page.update_weeks(weeks)
+
+    # ----- Tree/CRUD -----
 
     def _subtask_counts(self, t: Task) -> Dict[str, int]:
         counts = {"todo": 0, "waiting": 0, "onhold": 0, "done": 0}
@@ -600,10 +823,8 @@ class MainWindow(QtWidgets.QMainWindow):
             top.setForeground(0, QtGui.QBrush(QtGui.QColor("#000000")))
             top.setData(0, Qt.UserRole, ("task", id(t)))
 
-            # Subtask-Status-Indikatoren vorbereiten
             counts = self._subtask_counts(t)
             top.setData(0, Qt.UserRole + 1, counts)
-            # Tooltip mit Zahlen
             tt = (f"Subtasks – ToDo: {counts['todo']} | Warten: {counts['waiting']} | "
                   f"On Hold: {counts['onhold']} | Done: {counts['done']}")
             top.setToolTip(0, tt)
@@ -613,7 +834,6 @@ class MainWindow(QtWidgets.QMainWindow):
                     s.title, s.description, "", s.status, s.finished_date or "", "Subtask"
                 ])
                 child.setData(0, Qt.UserRole, ("subtask", id(t), id(s)))
-                self.tree.addTopLevelItem(top) if False else None  # no-op, keeps structure readable
                 top.addChild(child)
 
             self.tree.addTopLevelItem(top)
@@ -711,10 +931,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not sel or sel[0] not in ("task", "subtask"):
             QtWidgets.QMessageBox.information(self, "Hinweis", "Bitte zuerst eine Aufgabe oder einen Subtask (unter einer Aufgabe) auswählen.")
             return
-        if sel[0] == "task":
-            task = self.find_task_by_id(sel[1])
-        else:
-            task = self.find_task_by_id(sel[1])
+        task = self.find_task_by_id(sel[1])
         if not task:
             return
         dlg = SubtaskDialog(self)
@@ -885,7 +1102,7 @@ class RowDelegate(QtWidgets.QStyledItemDelegate):
     # Farben für die vier Kategorien (pastellig, auf Weiß gut sichtbar – Text bleibt schwarz)
     COLOR_TODO   = QtGui.QColor("#C3D6FD")   # graublau
     COLOR_WAIT   = QtGui.QColor("#F59E0B")   # amber
-    COLOR_ONHOLD = QtGui.QColor("#F86B6B")   # violett
+    COLOR_ONHOLD = QtGui.QColor("#F86B6B")   # violett/rot
     COLOR_DONE   = QtGui.QColor("#BDFFDD")   # grün
 
     def _draw_indicator(self, painter: QtGui.QPainter, center: QtCore.QPointF, radius: float, color: QtGui.QColor, text: str):
@@ -968,15 +1185,14 @@ class RowDelegate(QtWidgets.QStyledItemDelegate):
                 # Rechtsbündige Anordnung der vier Punkte
                 radius = 9.0
                 gap = 10.0
-                total_w = radius*2*4 + gap*3
                 cx_right = card_rect.right() - 14 - radius  # 14px Innenabstand rechts
                 cy = card_rect.center().y()
 
                 centers = [
-                    QtCore.QPointF(cx_right - (radius*2 + gap)*3, cy),
-                    QtCore.QPointF(cx_right - (radius*2 + gap)*2, cy),
-                    QtCore.QPointF(cx_right - (radius*2 + gap)*1, cy),
-                    QtCore.QPointF(cx_right - (radius*2 + gap)*0, cy),
+                    QtCore.QPointF(cx_right - (radius*2 + gap)*3, cy),  # ToDo
+                    QtCore.QPointF(cx_right - (radius*2 + gap)*2, cy),  # Warten
+                    QtCore.QPointF(cx_right - (radius*2 + gap)*1, cy),  # On Hold
+                    QtCore.QPointF(cx_right - (radius*2 + gap)*0, cy),  # Done
                 ]
 
                 # Reihenfolge: ToDo | Warten | On Hold | Done
