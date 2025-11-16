@@ -1,0 +1,35 @@
+[
+  {
+    "title": "Beispielprojekt",
+    "description": "Erste Aufgabe als Beispiel",
+    "priority": "Mittel",
+    "status": "Warte auf Antwort",
+    "finished_date": null,
+    "subtasks": [
+      {
+        "title": "Recherche",
+        "description": "Infos sammeln",
+        "status": "ToDo",
+        "finished_date": null,
+        "estimated_hours": 2.0,
+        "actual_hours": null
+      },
+      {
+        "title": "Kontakt aufnehmen",
+        "description": "E-Mail schreiben",
+        "status": "Warte auf Antwort",
+        "finished_date": null,
+        "estimated_hours": 1.0,
+        "actual_hours": null
+      },
+      {
+        "title": "Test",
+        "description": "asdasdasd",
+        "status": "Done",
+        "finished_date": "2025-11-16T15:43:19",
+        "estimated_hours": 1.25,
+        "actual_hours": 4.25
+      }
+    ]
+  }
+]

@@ -97,12 +97,23 @@ class Subtask:
     description: str = ""
     status: str = "ToDo"
     finished_date: Optional[str] = None
+    estimated_hours: float = 0.0
+    actual_hours: Optional[float] = None
 
     def normalize(self):
         if self.status not in STATI:
             self.status = "ToDo"
         if self.status != "Done":
             self.finished_date = None
+        try:
+            self.estimated_hours = max(0.0, float(self.estimated_hours))
+        except (TypeError, ValueError):
+            self.estimated_hours = 0.0
+        if self.actual_hours is not None:
+            try:
+                self.actual_hours = max(0.0, float(self.actual_hours))
+            except (TypeError, ValueError):
+                self.actual_hours = None
         return self
 
     def set_status(self, new_status: str):
@@ -302,11 +313,26 @@ class SubtaskDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.setWindowTitle("Subtask bearbeiten" if subtask else "Neuer Subtask")
         self.setMinimumWidth(520)
+        self._suspend_status_prompt = False
 
         self.title_edit = QtWidgets.QLineEdit()
         self.desc_edit = QtWidgets.QPlainTextEdit()
         self.status_combo = QtWidgets.QComboBox()
         self.status_combo.addItems(STATI)
+        self.status_combo.currentTextChanged.connect(self._on_status_changed)
+
+        self.estimate_spin = QtWidgets.QDoubleSpinBox()
+        self.estimate_spin.setRange(0.0, 1000.0)
+        self.estimate_spin.setDecimals(2)
+        self.estimate_spin.setSingleStep(0.25)
+        self.estimate_spin.setSuffix(" h")
+
+        self.actual_time_spin = QtWidgets.QDoubleSpinBox()
+        self.actual_time_spin.setRange(0.0, 1000.0)
+        self.actual_time_spin.setDecimals(2)
+        self.actual_time_spin.setSingleStep(0.25)
+        self.actual_time_spin.setSuffix(" h")
+        self.actual_time_spin.setEnabled(False)
 
         form = QtWidgets.QFormLayout()
         form.setHorizontalSpacing(14)
@@ -314,6 +340,8 @@ class SubtaskDialog(QtWidgets.QDialog):
         form.addRow("Titel:", self.title_edit)
         form.addRow("Beschreibung:", self.desc_edit)
         form.addRow("Status:", self.status_combo)
+        form.addRow("Zeitschätzung (Std.):", self.estimate_spin)
+        form.addRow("Ist-Zeit (Std.):", self.actual_time_spin)
 
         btns = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
         btns.accepted.connect(self.accept)
@@ -326,10 +354,19 @@ class SubtaskDialog(QtWidgets.QDialog):
         layout.addWidget(btns)
 
         self._subtask = subtask
+        self._last_status = subtask.status if subtask else "ToDo"
+        self._suspend_status_prompt = True
         if subtask:
             self.title_edit.setText(subtask.title)
             self.desc_edit.setPlainText(subtask.description)
             self.status_combo.setCurrentIndex(max(STATI.index(subtask.status), 0))
+            self.estimate_spin.setValue(float(subtask.estimated_hours or 0.0))
+            if subtask.actual_hours:
+                self.actual_time_spin.setValue(float(subtask.actual_hours))
+        else:
+            self.status_combo.setCurrentIndex(max(STATI.index("ToDo"), 0))
+        self._suspend_status_prompt = False
+        self._on_status_changed(self.status_combo.currentText())
 
     def get_subtask_data(self) -> Subtask:
         title = self.title_edit.text().strip()
@@ -344,7 +381,44 @@ class SubtaskDialog(QtWidgets.QDialog):
             s.set_status(status)
         else:
             s = Subtask(title=title, description=desc, status=status)
+        s.estimated_hours = self.estimate_spin.value()
+        s.actual_hours = self.actual_time_spin.value() if status == "Done" else None
         return s.normalize()
+
+    def _on_status_changed(self, status: str):
+        if self._suspend_status_prompt:
+            self._update_actual_field_state(status)
+            self._last_status = status
+            return
+
+        self._update_actual_field_state(status)
+        if status == "Done" and self.actual_time_spin.value() <= 0.0:
+            if not self._prompt_actual_time():
+                self._suspend_status_prompt = True
+                self.status_combo.setCurrentText(self._last_status)
+                self._suspend_status_prompt = False
+                self._update_actual_field_state(self._last_status)
+                return
+        self._last_status = status
+
+    def _update_actual_field_state(self, status: str):
+        self.actual_time_spin.setEnabled(status == "Done")
+
+    def _prompt_actual_time(self) -> bool:
+        suggested = self.actual_time_spin.value() or self.estimate_spin.value()
+        value, ok = QtWidgets.QInputDialog.getDouble(
+            self,
+            "Ist-Zeit erfassen",
+            "Bitte gib die tatsächlich benötigte Zeit in Stunden ein:",
+            suggested,
+            0.0,
+            1000.0,
+            2,
+        )
+        if ok:
+            self.actual_time_spin.setValue(value)
+            return True
+        return False
 
 
 # ---------- Charts-Seiten ----------
@@ -477,6 +551,78 @@ class WeeklyDonePage(QtWidgets.QWidget):
         self.chart.setAxisY(axisY, series)
 
 
+class TimeComparisonPage(QtWidgets.QWidget):
+    """Page mit Balkendiagramm (geschätzte vs. tatsächliche Zeit in Stunden)"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.chart = QChart()
+        self.chart.setTitle("Zeitvergleich (Subtasks)")
+        self.chart.setBackgroundBrush(QtGui.QBrush(QtGui.QColor("#FFFFFF")))
+        self.chart.setTitleBrush(QtGui.QBrush(QtGui.QColor("#000000")))
+        self.chart.legend().setVisible(True)
+        self.chart.legend().setLabelBrush(QtGui.QBrush(QtGui.QColor("#000000")))
+
+        self.view = QChartView(self.chart)
+        self.view.setRenderHint(QtGui.QPainter.Antialiasing, True)
+
+        self.info_label = QtWidgets.QLabel()
+        self.info_label.setAlignment(Qt.AlignCenter)
+        self.info_label.setWordWrap(True)
+        self.info_label.setStyleSheet("color: #000000; font-weight: 600;")
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(8)
+        layout.addWidget(self.view, 1)
+        layout.addWidget(self.info_label, 0)
+
+    def update_values(self, estimated_hours: float, actual_hours: float):
+        categories = ["Summe"]
+
+        est_set = QBarSet("Geschätzt")
+        est_set.append([estimated_hours])
+        est_set.setBrush(QtGui.QBrush(QtGui.QColor("#C3D6FD")))
+        est_set.setPen(QtGui.QPen(QtGui.QColor(0, 0, 0, 40)))
+
+        act_set = QBarSet("Ist")
+        act_set.append([actual_hours])
+        act_set.setBrush(QtGui.QBrush(QtGui.QColor("#BDFFDD")))
+        act_set.setPen(QtGui.QPen(QtGui.QColor(0, 0, 0, 40)))
+
+        series = QBarSeries()
+        series.append(est_set)
+        series.append(act_set)
+
+        self.chart.removeAllSeries()
+        self.chart.addSeries(series)
+
+        axisX = QBarCategoryAxis()
+        axisX.append(categories)
+        axisX.setLabelsBrush(QtGui.QBrush(QtGui.QColor("#000000")))
+
+        axisY = QValueAxis()
+        axisY.setLabelFormat("%.1f")
+        axisY.setMin(0.0)
+        axisY.setMax(max(estimated_hours, actual_hours, 1.0))
+        axisY.setLabelsBrush(QtGui.QBrush(QtGui.QColor("#000000")))
+        axisY.setTitleText("Stunden")
+        axisY.setTitleBrush(QtGui.QBrush(QtGui.QColor("#000000")))
+
+        self.chart.createDefaultAxes()
+        self.chart.setAxisX(axisX, series)
+        self.chart.setAxisY(axisY, series)
+
+        difference = actual_hours - estimated_hours
+        if estimated_hours > 0:
+            ratio = (actual_hours / estimated_hours) * 100.0
+            ratio_text = f"{ratio:.1f}% der geschätzten Zeit"
+        else:
+            ratio_text = "Keine Schätzung vorhanden"
+        self.info_label.setText(
+            f"Geschätzt: {estimated_hours:.2f} h | Tatsächlich: {actual_hours:.2f} h | Abweichung: {difference:+.2f} h ({ratio_text})"
+        )
+
+
 # ---------- Main Window ----------
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -516,6 +662,10 @@ class MainWindow(QtWidgets.QMainWindow):
         # Seite 3: Weekly Done
         self.weekly_page = WeeklyDonePage()
         self.tabs.addTab(self.weekly_page, "Abschlüsse pro Woche")
+
+        # Seite 4: Zeitvergleich
+        self.time_page = TimeComparisonPage()
+        self.tabs.addTab(self.time_page, "Zeitvergleich")
 
         self.setCentralWidget(self.tabs)
 
@@ -720,6 +870,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.refresh_tree_view()
         self.refresh_status_charts()
         self.refresh_weekly_done()
+        self.refresh_time_comparison()
 
     # ----- Helpers für Charts -----
 
@@ -769,6 +920,20 @@ class MainWindow(QtWidgets.QMainWindow):
         weeks = self._weekly_done_counts()
         self.weekly_page.update_weeks(weeks)
 
+    def _time_totals(self) -> Tuple[float, float]:
+        est = 0.0
+        actual = 0.0
+        for t in self.tasks:
+            for s in t.subtasks:
+                if s.status == "Done":
+                    est += max(0.0, float(s.estimated_hours or 0.0))
+                    actual += max(0.0, float(s.actual_hours or 0.0))
+        return (est, actual)
+
+    def refresh_time_comparison(self):
+        est, actual = self._time_totals()
+        self.time_page.update_values(est, actual)
+
     # ----- Tree/CRUD -----
 
     def _subtask_counts(self, t: Task) -> Dict[str, int]:
@@ -776,6 +941,30 @@ class MainWindow(QtWidgets.QMainWindow):
         for s in t.subtasks:
             counts[group_status(s.status)] += 1
         return counts
+
+    def _format_subtask_time_tooltip(self, subtask: Subtask) -> str:
+        est = max(0.0, float(subtask.estimated_hours or 0.0))
+        actual = subtask.actual_hours
+        actual_txt = f"{actual:.2f} h" if actual is not None else "–"
+        return f"Zeitschätzung: {est:.2f} h | Tatsächlich: {actual_txt}"
+
+    def _ensure_actual_time(self, subtask: Subtask) -> bool:
+        if subtask.actual_hours is not None and subtask.actual_hours > 0:
+            return True
+        suggested = max(0.0, float(subtask.estimated_hours or 0.0))
+        value, ok = QtWidgets.QInputDialog.getDouble(
+            self,
+            "Ist-Zeit erfassen",
+            f"Tatsächliche Zeit für „{subtask.title}“ (in Stunden):",
+            suggested,
+            0.0,
+            1000.0,
+            2,
+        )
+        if ok:
+            subtask.actual_hours = value
+            return True
+        return False
 
     def refresh_tree_view(self):
         self.tree.clear()
@@ -834,6 +1023,9 @@ class MainWindow(QtWidgets.QMainWindow):
                     s.title, s.description, "", s.status, s.finished_date or "", "Subtask"
                 ])
                 child.setData(0, Qt.UserRole, ("subtask", id(t), id(s)))
+                tip = self._format_subtask_time_tooltip(s)
+                child.setToolTip(0, tip)
+                child.setToolTip(1, tip)
                 top.addChild(child)
 
             self.tree.addTopLevelItem(top)
@@ -954,7 +1146,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
             if task.subtasks:
                 for s in task.subtasks:
+                    previous_status = s.status
                     s.set_status("Done")
+                    if not self._ensure_actual_time(s):
+                        s.set_status(previous_status)
+                        task.recompute_status_from_subtasks()
+                        return
                 task.recompute_status_from_subtasks()
             else:
                 task.set_status("Done")
@@ -964,7 +1161,11 @@ class MainWindow(QtWidgets.QMainWindow):
             sub = self.find_subtask_by_id(task, sel[2]) if task else None
             if not task or not sub:
                 return
+            previous_status = sub.status
             sub.set_status("Done")
+            if not self._ensure_actual_time(sub):
+                sub.set_status(previous_status)
+                return
             task.recompute_status_from_subtasks()
             self.persist_and_reload()
 
@@ -1074,8 +1275,22 @@ def ensure_json_exists(path: Path):
                 "status": "ToDo",
                 "finished_date": None,
                 "subtasks": [
-                    {"title": "Recherche", "description": "Infos sammeln", "status": "ToDo", "finished_date": None},
-                    {"title": "Kontakt aufnehmen", "description": "E-Mail schreiben", "status": "Warte auf Antwort", "finished_date": None},
+                    {
+                        "title": "Recherche",
+                        "description": "Infos sammeln",
+                        "status": "ToDo",
+                        "finished_date": None,
+                        "estimated_hours": 2.0,
+                        "actual_hours": None,
+                    },
+                    {
+                        "title": "Kontakt aufnehmen",
+                        "description": "E-Mail schreiben",
+                        "status": "Warte auf Antwort",
+                        "finished_date": None,
+                        "estimated_hours": 1.0,
+                        "actual_hours": None,
+                    },
                 ]
             }
         ]
